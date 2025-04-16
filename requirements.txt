@@ -1,0 +1,5 @@
+pandas
+requests
+pytz
+psycopg2-binary
+python-dotenv
