@@ -4,6 +4,7 @@ import requests
 import pytz
 import psycopg2
 import os
+import time
 from datetime import timedelta, datetime
 from pandas import json_normalize
 from dotenv import load_dotenv
@@ -506,23 +507,53 @@ def upload_to_database(credentials, dataframe, table_name='raw_spend_facebook'):
 
 
 def main():
-    """Orchestrates the entire pipeline."""
+    """Orchestrates the entire pipeline with retry logic."""
     try:
         # Initialize
         start_date, end_date = calculate_dates()
         credentials = get_credentials_with_validation()
 
-        # Execute pipeline
-        insights_data = fetch_and_process_insights(
-            credentials, start_date, end_date)
-        status_data = fetch_and_process_status(
-            credentials, start_date, end_date)
-        combined_data = combine_datasets(insights_data, status_data)
-        upload_to_database(credentials, combined_data)
+        # Retry configuration
+        max_attempts = 3
+        attempt = 1
 
-        print("Pipeline completed successfully!")
+        while attempt <= max_attempts:
+            print(f"Pipeline execution attempt {attempt} of {max_attempts}")
+
+            # Execute pipeline - fetch insights
+            insights_data = fetch_and_process_insights(
+                credentials, start_date, end_date)
+            if isinstance(insights_data, pd.DataFrame) and insights_data.empty:
+                print(
+                    f"Attempt {attempt}: insights_data is empty, retrying...")
+                time.sleep(5)  # Add a delay before retrying
+                attempt += 1
+                continue
+
+            # Execute pipeline - fetch status
+            status_data = fetch_and_process_status(
+                credentials, start_date, end_date)
+            if isinstance(status_data, pd.DataFrame) and status_data.empty:
+                print(f"Attempt {attempt}: status_data is empty, retrying...")
+                time.sleep(5)  # Add a delay before retrying
+                attempt += 1
+                continue
+
+            # If we reach here, both datasets are non-empty
+            combined_data = combine_datasets(insights_data, status_data)
+            upload_to_database(credentials, combined_data)
+
+            print("Pipeline completed successfully!")
+            return
+
+        # If we exit the loop, all attempts failed
+        error_msg = f"Pipeline failed after {max_attempts} attempts: Empty datasets"
+        print(error_msg)
+        raise Exception(error_msg)
+
     except Exception as e:
-        print(f"Pipeline failed: {str(e)}")
+        error_msg = f"Pipeline failed: {str(e)}"
+        print(error_msg)
         raise
 
 
