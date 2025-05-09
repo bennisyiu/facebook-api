@@ -8,6 +8,7 @@ import time
 from datetime import timedelta, datetime
 from pandas import json_normalize
 from dotenv import load_dotenv
+from requests.exceptions import Timeout, RequestException
 
 
 def get_credentials():
@@ -37,35 +38,47 @@ def get_credentials():
     return fb_credentials, db_credentials
 
 
-def fb_api_caller(url, params):
-    """
-    Generic Facebook API caller function to handle pagination and data retrieval.
-    """
+def fb_api_caller(url, params, max_retries=3, timeout=20):
+    print('Entering fb_api_caller')
     all_data = []
+    retry_count = 0
 
-    # Loop through pagination until no more pages
-    while url:
-        response = requests.get(url, params=params)
-
+    while url and retry_count < max_retries:
         try:
+            print(f'Making request to URL: {url}')
+            response = requests.get(url, params=params, timeout=timeout)
+            print(f'Response status code: {response.status_code}')
+
+            response.raise_for_status()
             data = response.json()
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
-            break
 
-        if 'data' in data:
-            all_data.extend(data['data'])  # Collect data from this page
-        else:
-            print("No data found in response")
-            break
+            if 'data' in data:
+                all_data.extend(data['data'])
+                print(
+                    f"Collected {len(data['data'])} items. Total: {len(all_data)}")
+            else:
+                print("No data found in response")
+                break
 
-        # Check if there's a next page
-        if 'paging' in data and 'next' in data['paging']:
-            url = data['paging']['next']  # Follow the next link
-            params = {}  # Clear params for subsequent requests since next link contains them
-        else:
-            url = None  # No more pages
+            if 'paging' in data and 'next' in data['paging']:
+                url = data['paging']['next']
+                params = {}  # Clear params as they're included in the next URL
+            else:
+                url = None
+                print("No more pages")
 
+            retry_count = 0  # Reset retry count on successful request
+
+        except (Timeout, RequestException) as e:
+            retry_count += 1
+            print(
+                f"Request failed: {e}. Retry attempt {retry_count} of {max_retries}")
+            if retry_count == max_retries:
+                print("Max retries reached. Exiting.")
+                break
+            time.sleep(2 ** retry_count)  # Exponential backoff
+
+    print(f'Exiting fb_api_caller. Total items collected: {len(all_data)}')
     return all_data
 
 
@@ -75,6 +88,8 @@ def fb_insights_caller(fb_credentials, start_date, end_date, level):
     """
     access_token = fb_credentials['access_token']
     ad_account_id = fb_credentials['ad_account_id']
+
+    print('hello fb_insights_caller **')
 
     url = f'https://graph.facebook.com/v22.0/act_{ad_account_id}/insights'
     params = {
@@ -87,7 +102,6 @@ def fb_insights_caller(fb_credentials, start_date, end_date, level):
 
     # Fetch and return the data
     all_data = fb_api_caller(url, params)
-    # print(all_data)
 
     # Pretty-print the data and let JSON handle Unicode properly
     # print(json.dumps(all_data, ensure_ascii=False, indent=4))
@@ -96,29 +110,29 @@ def fb_insights_caller(fb_credentials, start_date, end_date, level):
     return all_data
 
 
-def fb_status_caller(fb_credentials, start_date, end_date, level):
+def fb_status_caller(fb_credentials, start_date, end_date, level, limit=100):
     """
     Fetch Facebook campaign status data.
     """
     access_token = fb_credentials['access_token']
     ad_account_id = fb_credentials['ad_account_id']
 
-    url = f'https://graph.facebook.com/v21.0/act_{ad_account_id}/campaigns'
+    print('Entering fb_status_caller')
+
+    url = f'https://graph.facebook.com/v22.0/act_{ad_account_id}/campaigns'
     params = {
         'access_token': access_token,
         'time_range': json.dumps({'since': start_date, 'until': end_date}),
-        'level': {level},
+        'level': level,
         'fields': 'id,name,effective_status,status,start_time,stop_time',
-        'time_increment': 1
+        'limit': limit  # Add this line to limit the number of results per page
     }
 
     # Fetch and return the data
     all_data = fb_api_caller(url, params)
 
-    # Pretty-print the data and let JSON handle Unicode properly
-    # print(json.dumps(all_data, ensure_ascii=False, indent=4))
-    print(f'{len(all_data)} of status data from will be inserted.')
-
+    print(f"fb_status_caller received {len(all_data)} items")
+    print("Exiting fb_status_caller")
     return all_data
 
 
@@ -234,42 +248,58 @@ def process_fb_insights(all_data):
 
 
 def process_fb_status(all_data):
-    """Process FB status data extracted from through fd_status_caller()
+    """Process FB status data extracted from through fb_status_caller()
     Return a dataframe with columns mapped: 
         campaign_id, campaign_name, delivery_status, ad_start_time, ad_stop_time
     """
-    # Convert to DataFrame
-    df = pd.json_normalize(all_data)
+    print("Entering process_fb_status")
+    print(f"Processing {len(all_data)} items")
 
-    # Rename columns
-    column_mapping = {
-        'id': 'campaign_id',
-        'name': 'campaign_name',
-        'status': 'delivery_status',
-        'start_time': 'ad_start_time',
-        'stop_time': 'ad_stop_time'
-    }
+    if not all_data:
+        print("Warning: No data to process in process_fb_status")
+        return pd.DataFrame()
 
-    df = df.rename(columns=column_mapping)
+    try:
+        # Convert to DataFrame
+        df = pd.json_normalize(all_data)
 
-    # Keep only the columns we want
-    columns_to_keep = [
-        'campaign_id',
-        'campaign_name',
-        'delivery_status',
-        'ad_start_time',
-        'ad_stop_time'
-    ]
+        print(f"DataFrame created with shape: {df.shape}")
 
-    df = df[columns_to_keep]
+        # Rename columns
+        column_mapping = {
+            'id': 'campaign_id',
+            'name': 'campaign_name',
+            'status': 'delivery_status',
+            'start_time': 'ad_start_time',
+            'stop_time': 'ad_stop_time'
+        }
 
-    # Convert datetime columns and ensure UTC timezone
-    datetime_columns = ['ad_start_time', 'ad_stop_time']
-    for col in datetime_columns:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], utc=True)
+        df = df.rename(columns=column_mapping)
 
-    return df
+        # Keep only the columns we want
+        columns_to_keep = [
+            'campaign_id',
+            'campaign_name',
+            'delivery_status',
+            'ad_start_time',
+            'ad_stop_time'
+        ]
+
+        df = df[columns_to_keep]
+
+        # Convert datetime columns and ensure UTC timezone
+        datetime_columns = ['ad_start_time', 'ad_stop_time']
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], utc=True)
+
+        print(f"Processed DataFrame shape: {df.shape}")
+        print("Exiting process_fb_status")
+        return df
+
+    except Exception as e:
+        print(f"Error in process_fb_status: {str(e)}")
+        return pd.DataFrame()
 
 
 def combine_fb_data(insights_df, status_df):
@@ -476,9 +506,11 @@ def fetch_and_process_status(credentials, start_date, end_date, level='campaign'
     print("Fetching campaign status data...")
     fb_status_result = fb_status_caller(
         credentials[0], start_date, end_date, level)
+    print(f"fb_status_caller returned {len(fb_status_result)} items")
 
     print("Processing FB status...")
     status_df = process_fb_status(fb_status_result)
+    print(f"Processed status DataFrame shape: {status_df.shape}")
 
     if status_df.empty:
         raise ValueError("No status data retrieved")
@@ -507,54 +539,71 @@ def upload_to_database(credentials, dataframe, table_name='raw_spend_facebook'):
 
 
 def main():
-    """Orchestrates the entire pipeline with retry logic."""
+    """Orchestrates the entire pipeline with improved error handling and logging."""
     try:
         # Initialize
         start_date, end_date = calculate_dates()
+        print(f"Date range: {start_date} to {end_date}")
         credentials = get_credentials_with_validation()
+        print("Credentials validated successfully")
 
-        # Retry configuration
+        # Execute pipeline - fetch insights
+        print("Fetching and processing insights data...")
+        insights_data = fetch_and_process_insights(
+            credentials, start_date, end_date)
+        if insights_data.empty:
+            raise ValueError("No insights data retrieved")
+        print(f"Insights data shape: {insights_data.shape}")
+
+        # Retry configuration for status data
         max_attempts = 3
         attempt = 1
 
         while attempt <= max_attempts:
-            print(f"Pipeline execution attempt {attempt} of {max_attempts}")
+            print(f"Status data fetch attempt {attempt} of {max_attempts}")
+            try:
+                # Execute pipeline - fetch status
+                status_data = fetch_and_process_status(
+                    credentials, start_date, end_date)
 
-            # Execute pipeline - fetch insights
-            insights_data = fetch_and_process_insights(
-                credentials, start_date, end_date)
-            if isinstance(insights_data, pd.DataFrame) and insights_data.empty:
+                if not status_data.empty:
+                    print(f"Status data shape: {status_data.shape}")
+                    # Combine datasets
+                    combined_data = combine_datasets(
+                        insights_data, status_data)
+                    print(f"Combined data shape: {combined_data.shape}")
+
+                    # Upload to database
+                    upload_to_database(credentials, combined_data)
+                    print("Pipeline completed successfully!")
+                    return {
+                        'statusCode': 200,
+                        'body': json.dumps('Data pipeline executed successfully')
+                    }
+                else:
+                    print(
+                        f"Attempt {attempt}: status_data is empty, retrying...")
+            except Exception as e:
                 print(
-                    f"Attempt {attempt}: insights_data is empty, retrying...")
+                    f"Error in fetch_and_process_status (Attempt {attempt}): {str(e)}")
+
+            attempt += 1
+            if attempt <= max_attempts:
+                print(f"Waiting for 5 seconds before retry...")
                 time.sleep(5)  # Add a delay before retrying
-                attempt += 1
-                continue
-
-            # Execute pipeline - fetch status
-            status_data = fetch_and_process_status(
-                credentials, start_date, end_date)
-            if isinstance(status_data, pd.DataFrame) and status_data.empty:
-                print(f"Attempt {attempt}: status_data is empty, retrying...")
-                time.sleep(5)  # Add a delay before retrying
-                attempt += 1
-                continue
-
-            # If we reach here, both datasets are non-empty
-            combined_data = combine_datasets(insights_data, status_data)
-            upload_to_database(credentials, combined_data)
-
-            print("Pipeline completed successfully!")
-            return
 
         # If we exit the loop, all attempts failed
-        error_msg = f"Pipeline failed after {max_attempts} attempts: Empty datasets"
+        error_msg = f"Pipeline failed after {max_attempts} attempts: Empty or failed status data"
         print(error_msg)
         raise Exception(error_msg)
 
     except Exception as e:
         error_msg = f"Pipeline failed: {str(e)}"
         print(error_msg)
-        raise
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f'Error: {error_msg}')
+        }
 
 
 if __name__ == "__main__":
