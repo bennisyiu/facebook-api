@@ -13,7 +13,7 @@ from requests.exceptions import Timeout, RequestException
 
 def get_credentials():
     """Load and validate credentials from environment variables."""
-    load_dotenv()  # Load .env file
+    load_dotenv(override=True)  # Load .env file
 
     # Facebook credentials
     fb_token = os.getenv("FB_ACCESS_TOKEN")
@@ -91,11 +91,11 @@ def fb_insights_caller(fb_credentials, start_date, end_date, level):
 
     print('hello fb_insights_caller **')
 
-    url = f'https://graph.facebook.com/v22.0/act_{ad_account_id}/insights'
+    url = f'https://graph.facebook.com/v23.0/act_{ad_account_id}/insights'
     params = {
         'access_token': access_token,
         'time_range': json.dumps({'since': start_date, 'until': end_date}),
-        'level': {level},
+        'level': level,
         'fields': 'campaign_name,outbound_clicks,spend,campaign_id,reach,actions,frequency,impressions',
         'time_increment': 1
     }
@@ -119,7 +119,7 @@ def fb_status_caller(fb_credentials, start_date, end_date, level, limit=100):
 
     print('Entering fb_status_caller')
 
-    url = f'https://graph.facebook.com/v22.0/act_{ad_account_id}/campaigns'
+    url = f'https://graph.facebook.com/v23.0/act_{ad_account_id}/campaigns'
     params = {
         'access_token': access_token,
         'time_range': json.dumps({'since': start_date, 'until': end_date}),
